@@ -1266,10 +1266,10 @@ def assign_driver_callback(call):
     
     order_id = int(parts[1])
     
-    # Получаем список доступных водителей (исключаем тех, кто на заказе/на месте)
+    # Получаем список доступных водителей (исключаем только тех, кто дома или на месте)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM drivers WHERE is_approved = 1 AND status = "ON_DUTY"')
+    cursor.execute('SELECT * FROM drivers WHERE is_approved = 1 AND status IN ("ON_DUTY", "ON_ORDER")')
     drivers = cursor.fetchall()
     
     if not drivers:
@@ -1291,7 +1291,14 @@ def assign_driver_callback(call):
     # Создаем клавиатуру с водителями
     markup = telebot.types.InlineKeyboardMarkup()
     for driver in drivers:
-        button_text = f"{driver['first_name']} - {driver['car_number']}"
+        # Подсчитываем активные заказы водителя
+        cursor.execute('SELECT COUNT(*) FROM orders WHERE driver_id = ? AND status IN ("IN_PROGRESS", "ACCEPTED")', (driver['id'],))
+        active_orders_count = cursor.fetchone()[0]
+        
+        if active_orders_count > 0:
+            button_text = f"{driver['first_name']} - {driver['car_number']} ({active_orders_count} заказ{'а' if active_orders_count > 1 else ''})"
+        else:
+            button_text = f"{driver['first_name']} - {driver['car_number']}"
         markup.add(telebot.types.InlineKeyboardButton(button_text, callback_data=f"select_driver:{order_id}:{driver['id']}"))
     
     bot.send_message(
@@ -1366,8 +1373,9 @@ def select_driver_callback(call):
     # Обновляем заказ
     cursor.execute('UPDATE orders SET driver_id = ?, status = ? WHERE id = ?', (driver_id, 'IN_PROGRESS', order_id))
     
-    # Обновляем статус водителя
-    cursor.execute('UPDATE drivers SET status = ? WHERE id = ?', ('ON_ORDER', driver_id))
+    # Обновляем статус водителя на "На заказе" только если он был "На линии"
+    if driver['status'] == 'ON_DUTY':
+        cursor.execute('UPDATE drivers SET status = ? WHERE id = ?', ('ON_ORDER', driver_id))
     
     conn.commit()
     
@@ -2772,10 +2780,19 @@ def driver_orders(message):
         )
         return
     
-    # Получаем заказы водителя
+    # Получаем заказы водителя (сначала активные, потом последние завершенные)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM orders WHERE driver_id = ? ORDER BY created_at DESC LIMIT 5', (driver['id'],))
+    cursor.execute('''
+        SELECT * FROM orders WHERE driver_id = ? 
+        ORDER BY 
+            CASE 
+                WHEN status IN ('IN_PROGRESS', 'ACCEPTED', 'ARRIVED') THEN 0 
+                ELSE 1 
+            END,
+            created_at DESC 
+        LIMIT 10
+    ''', (driver['id'],))
     orders = cursor.fetchall()
     
     if not orders:
@@ -2786,6 +2803,15 @@ def driver_orders(message):
         )
         conn.close()
         return
+    
+    # Подсчитываем активные заказы
+    active_orders = [order for order in orders if order['status'] in ('IN_PROGRESS', 'ACCEPTED', 'ARRIVED')]
+    completed_orders = [order for order in orders if order['status'] not in ('IN_PROGRESS', 'ACCEPTED', 'ARRIVED')]
+    
+    # Отправляем заголовок с количеством активных заказов
+    if active_orders:
+        header_text = f"🚕 <b>Ваши заказы</b>\n\n📋 Активных заказов: {len(active_orders)}\n{'='*30}"
+        bot.send_message(message.chat.id, header_text, parse_mode="HTML")
     
     # Отправляем информацию о каждом заказе
     for order in orders:
@@ -2863,8 +2889,13 @@ def complete_order_callback(call):
     # Обновляем статус заказа
     cursor.execute('UPDATE orders SET status = ?, completed_at = ? WHERE id = ?', ('COMPLETED', datetime.datetime.now(datetime.timezone.utc).isoformat(), order_id))
     
-    # Обновляем статус водителя
-    cursor.execute('UPDATE drivers SET status = ? WHERE id = ?', ('ON_DUTY', driver['id']))
+    # Проверяем, есть ли у водителя другие активные заказы
+    cursor.execute('SELECT COUNT(*) FROM orders WHERE driver_id = ? AND status IN ("IN_PROGRESS", "ACCEPTED", "ARRIVED") AND id != ?', (driver['id'], order_id))
+    other_active_orders = cursor.fetchone()[0]
+    
+    # Обновляем статус водителя только если нет других активных заказов
+    if other_active_orders == 0:
+        cursor.execute('UPDATE drivers SET status = ? WHERE id = ?', ('ON_DUTY', driver['id']))
     
     # Добавляем запись о заработке
     cursor.execute('INSERT INTO earnings (driver_id, order_id, amount) VALUES (?, ?, ?)', (driver['id'], order_id, order['price']))
@@ -2890,10 +2921,17 @@ def complete_order_callback(call):
     )
     
     # Уведомляем водителя
+    completion_message = f"✅ Заказ #{client_order_number} успешно завершен.\n" \
+                        f"Сумма {order['price']} руб. добавлена к вашему заработку."
+    
+    if other_active_orders > 0:
+        completion_message += f"\n\n📋 У вас осталось активных заказов: {other_active_orders}"
+    else:
+        completion_message += f"\n\n🏠 Вы переведены в статус 'На линии'"
+    
     bot.send_message(
         call.message.chat.id,
-        f"✅ Заказ #{client_order_number} успешно завершен.\n"
-        f"Сумма {order['price']} руб. добавлена к вашему заработку.",
+        completion_message,
         reply_markup=get_driver_keyboard()
     )
     
