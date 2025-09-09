@@ -356,7 +356,7 @@ def admin_command(message):
     )
 
 @bot.message_handler(commands=['order'])
-@bot.message_handler(func=lambda message: message.text == "🚕 Заказать такси")
+@bot.message_handler(func=lambda message: message.text == "🚕 Заказать предварительно такси")
 def order_taxi(message):
     user_id = message.from_user.id
     
@@ -508,8 +508,8 @@ def confirm_preorder_callback(call):
     client_order_number = cursor.fetchone()[0] + 1
     
     cursor.execute(
-        'INSERT INTO orders (client_id, from_address, to_address, payment_method, comment, status) VALUES (?,?,?,?,?,?)',
-        (u['id'], data['from_address'], data['to_address'], data.get('payment_method'), data.get('comment'), 'NEW')
+        'INSERT INTO orders (client_id, from_address, to_address, payment_method, comment, status, scheduled_at) VALUES (?,?,?,?,?,?,?)',
+        (u['id'], data['from_address'], data['to_address'], data.get('payment_method'), data.get('comment'), 'NEW', data.get('scheduled_at'))
     )
     conn.commit()
     order_id = cursor.lastrowid
