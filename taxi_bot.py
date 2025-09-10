@@ -644,6 +644,15 @@ def process_to_address(message):
     if message.text in POPULAR_DESTINATIONS:
         to_city = message.text
         user_order_data[user_id]['to_city'] = to_city
+        
+        # Для аэропорта не спрашиваем адрес - он один
+        if "Аэропорт" in message.text:
+            user_order_data[user_id]['to_address'] = message.text
+            # Переходим сразу к комментарию
+            bot.send_message(message.chat.id, "Добавьте комментарий к заказу (необязательно). Если не нужен, отправьте '-':", reply_markup=None)
+            bot.register_next_step_handler(message, process_preorder_comment)
+            return
+        
         bot.send_message(
             message.chat.id,
             f"Введите улицу и дом в пункте назначения ({to_city}):",
@@ -899,6 +908,14 @@ def active_orders(message):
         
         if order['price']:
             order_text += f"💰 <b>Цена:</b> {order['price']} руб.\n"
+        
+        # Добавляем запланированное время для админа
+        if order.get('scheduled_at'):
+            try:
+                scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+                order_text += f"🕐 <b>Запланированное время:</b> {scheduled_time}\n"
+            except:
+                pass
         
         status_map = {
             "NEW": "Новый",
@@ -1157,7 +1174,7 @@ def accept_price_callback(call):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('SELECT price FROM orders WHERE id = ?', (order_id,))
+    cursor.execute('SELECT price, scheduled_at FROM orders WHERE id = ?', (order_id,))
     order = cursor.fetchone()
     
     if not order:
@@ -1184,10 +1201,18 @@ def accept_price_callback(call):
     conn.close()
     
     # Уведомляем клиента
+    scheduled_text = ""
+    if order['scheduled_at']:
+        try:
+            scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+            scheduled_text = f"\n🕐 Запланированное время: {scheduled_time}"
+        except:
+            pass
+    
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text=f"✅ Вы приняли цену {order['price']} руб. за поездку #{client_order_number}.\n\n"
+        text=f"✅ Вы приняли цену {order['price']} руб. за поездку #{client_order_number}.{scheduled_text}\n\n"
              f"Ожидайте, в ближайшее время вам будет назначен водитель.",
         reply_markup=None
     )
@@ -1424,6 +1449,14 @@ def select_driver_callback(call):
     driver_text += f"От: {order['from_address']}\n"
     driver_text += f"До: {order['to_address']}\n"
     driver_text += f"Цена: {order['price']} руб.\n"
+    
+    # Добавляем время заказа
+    if order.get('scheduled_at'):
+        try:
+            scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+            driver_text += f"🕐 Время подачи: {scheduled_time}\n"
+        except:
+            pass
     
     if order['comment']:
         driver_text += f"Комментарий: {order['comment']}\n"
@@ -1950,6 +1983,14 @@ def my_orders(message):
         
         if order['counter_offer']:
             order_text += f"💸 <b>Ваше предложение:</b> {order['counter_offer']} руб.\n"
+        
+        # Добавляем запланированное время
+        if order.get('scheduled_at'):
+            try:
+                scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+                order_text += f"🕐 <b>Запланированное время:</b> {scheduled_time}\n"
+            except:
+                pass
         
         status_map = {
             "NEW": "Новый",
@@ -2828,6 +2869,14 @@ def driver_orders(message):
         
         if order['price']:
             order_text += f"💰 <b>Цена:</b> {order['price']} руб.\n"
+        
+        # Добавляем запланированное время для водителя
+        if order.get('scheduled_at'):
+            try:
+                scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+                order_text += f"🕐 <b>Время подачи:</b> {scheduled_time}\n"
+            except:
+                pass
         
         status_map = {
             "NEW": "Новый",
