@@ -879,7 +879,7 @@ def active_orders(message):
         SELECT o.*, u.first_name, u.last_name, u.username
         FROM orders o
         JOIN users u ON o.client_id = u.id
-        WHERE o.status IN ('NEW', 'PRICE_OFFERED', 'ACCEPTED', 'IN_PROGRESS')
+        WHERE o.status IN ('NEW', 'PRICE_OFFERED', 'COUNTER_OFFERED', 'ACCEPTED', 'IN_PROGRESS', 'ARRIVED')
         ORDER BY o.created_at DESC
     ''')
     
@@ -914,7 +914,7 @@ def active_orders(message):
             order_text += f"💰 <b>Цена:</b> {order['price']} руб.\n"
         
         # Добавляем запланированное время для админа
-        if order.get('scheduled_at'):
+        if order['scheduled_at']:
             try:
                 scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
                 order_text += f"🕐 <b>Запланированное время:</b> {scheduled_time}\n"
@@ -958,7 +958,7 @@ def show_statistics(message):
     completed_orders = cursor.fetchone()[0]
     
     # Активные заказы
-    cursor.execute('SELECT COUNT(*) FROM orders WHERE status IN ("NEW", "PRICE_OFFERED", "ACCEPTED", "IN_PROGRESS")')
+    cursor.execute('SELECT COUNT(*) FROM orders WHERE status IN ("NEW", "PRICE_OFFERED", "COUNTER_OFFERED", "ACCEPTED", "IN_PROGRESS", "ARRIVED")')
     active_orders = cursor.fetchone()[0]
     
     # Количество клиентов
@@ -1455,7 +1455,7 @@ def select_driver_callback(call):
     driver_text += f"Цена: {order['price']} руб.\n"
     
     # Добавляем время заказа
-    if order.get('scheduled_at'):
+    if order['scheduled_at']:
         try:
             scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
             driver_text += f"🕐 Время подачи: {scheduled_time}\n"
@@ -1989,7 +1989,7 @@ def my_orders(message):
             order_text += f"💸 <b>Ваше предложение:</b> {order['counter_offer']} руб.\n"
         
         # Добавляем запланированное время
-        if order.get('scheduled_at'):
+        if order['scheduled_at']:
             try:
                 scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
                 order_text += f"🕐 <b>Запланированное время:</b> {scheduled_time}\n"
@@ -2875,7 +2875,7 @@ def driver_orders(message):
             order_text += f"💰 <b>Цена:</b> {order['price']} руб.\n"
         
         # Добавляем запланированное время для водителя
-        if order.get('scheduled_at'):
+        if order['scheduled_at']:
             try:
                 scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
                 order_text += f"🕐 <b>Время подачи:</b> {scheduled_time}\n"
