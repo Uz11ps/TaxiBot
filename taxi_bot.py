@@ -866,8 +866,12 @@ def back_to_main_menu(message):
     )
 
 # Обработчики админских кнопок
-@bot.message_handler(func=lambda message: message.text == "📊 Активные заказы" and is_admin(message.from_user.id))
+@bot.message_handler(func=lambda message: message.text == "📊 Активные заказы")
 def active_orders(message):
+    # Проверка прав администратора внутри хендлера, чтобы событие точно доходило
+    if not is_admin(message.from_user.id):
+        bot.send_message(message.chat.id, "Доступ запрещен.")
+        return
     conn = get_db_connection()
     cursor = conn.cursor()
     
