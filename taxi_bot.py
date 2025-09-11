@@ -222,7 +222,7 @@ def get_main_keyboard():
 def get_admin_keyboard():
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(telebot.types.KeyboardButton("📊 Активные заказы"))
-    markup.add(telebot.types.KeyboardButton("👨‍✈️ Управление водителями"), telebot.types.KeyboardButton("📋 История заказов"))
+    markup.add(telebot.types.KeyboardButton("🚖 Зарегистрированные водители"), telebot.types.KeyboardButton("📋 История заказов"))
     markup.add(telebot.types.KeyboardButton("📈 Статистика"), telebot.types.KeyboardButton("🗑️ Очистить заказы"))
     markup.add(telebot.types.KeyboardButton("➕ Добавить администратора"))
     markup.add(telebot.types.KeyboardButton("🔙 Главное меню"))
@@ -374,7 +374,7 @@ def order_taxi(message):
     # Новый шаг: дата и время
     bot.send_message(
         message.chat.id,
-        "Укажите дату и время подачи такси (например: 10.09 14:30):",
+        "Укажите дату и время подачи такси (например: 10.09 14:30).\nНе ранее чем через 30 минут от текущего времени:",
         reply_markup=None
     )
     bot.register_next_step_handler(message, process_schedule_datetime)
@@ -392,6 +392,11 @@ def process_schedule_datetime(message):
         dt = datetime.datetime(year=now.year, month=int(month), day=int(day), hour=int(hours), minute=int(minutes))
         if dt < now:
             raise ValueError('past')
+        # Минимальный интервал: 30 минут
+        if dt < now + datetime.timedelta(minutes=30):
+            bot.send_message(message.chat.id, "Время подачи должно быть не раньше, чем через 30 минут. Укажите другое время:")
+            bot.register_next_step_handler(message, process_schedule_datetime)
+            return
     except Exception:
         bot.send_message(message.chat.id, "Неверный формат. Пример: 10.09 14:30. Повторите ввод:")
         bot.register_next_step_handler(message, process_schedule_datetime)
@@ -937,6 +942,10 @@ def active_orders(message):
         elif order['status'] == 'ACCEPTED':
             markup.add(telebot.types.InlineKeyboardButton("🚕 Назначить водителя", callback_data=f"assign_driver:{order['id']}"))
         
+        # Кнопка: назначить следующий заказ текущему водителю (если уже назначен)
+        if order['driver_id']:
+            markup.add(telebot.types.InlineKeyboardButton("🚕 Назначить следующий заказ", callback_data=f"assign_next:{order['id']}"))
+        
         bot.send_message(
             message.chat.id,
             order_text,
@@ -1228,11 +1237,14 @@ def accept_price_callback(call):
         reply_markup=get_main_keyboard()
     )
     
-    # Уведомляем админа
-    send_to_admins(
+    # Уведомляем админа c кнопкой назначения водителя
+    admin_text = (
         f"✅ Клиент принял цену {order['price']} руб. за заказ #{client_order_number} (ID: {order_id}).\n"
         f"Необходимо назначить водителя."
     )
+    admin_markup = telebot.types.InlineKeyboardMarkup()
+    admin_markup.add(telebot.types.InlineKeyboardButton("🚕 Назначить водителя", callback_data=f"assign_driver:{order_id}"))
+    send_to_admins(admin_text, reply_markup=admin_markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("decline_price:"))
 def decline_price_callback(call):
@@ -1295,10 +1307,10 @@ def assign_driver_callback(call):
     
     order_id = int(parts[1])
     
-    # Получаем список доступных водителей (исключаем только тех, кто дома или на месте)
+    # Получаем список всех одобренных водителей (любой статус)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM drivers WHERE is_approved = 1 AND status IN ("ON_DUTY", "ON_ORDER")')
+    cursor.execute('SELECT * FROM drivers WHERE is_approved = 1')
     drivers = cursor.fetchall()
     
     if not drivers:
@@ -1402,8 +1414,8 @@ def select_driver_callback(call):
     # Обновляем заказ
     cursor.execute('UPDATE orders SET driver_id = ?, status = ? WHERE id = ?', (driver_id, 'IN_PROGRESS', order_id))
     
-    # Обновляем статус водителя на "На заказе" только если он был "На линии"
-    if driver['status'] == 'ON_DUTY':
+    # Обновляем статус водителя на "На заказе" если он был "На линии" или "Дома"
+    if driver['status'] in ('ON_DUTY', 'OFF_DUTY'):
         cursor.execute('UPDATE drivers SET status = ? WHERE id = ?', ('ON_ORDER', driver_id))
     
     conn.commit()
@@ -1475,6 +1487,151 @@ def select_driver_callback(call):
         parse_mode="HTML",
         reply_markup=markup
     )
+
+# Админ: назначить следующий заказ этому же водителю
+@bot.callback_query_handler(func=lambda call: call.data.startswith("assign_next:") and is_admin(call.from_user.id))
+def assign_next_callback(call):
+    parts = call.data.split(":")
+    if len(parts) != 2:
+        bot.answer_callback_query(call.id, "Ошибка обработки")
+        return
+    base_order_id = int(parts[1])
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT driver_id FROM orders WHERE id = ?', (base_order_id,))
+    base_order = cursor.fetchone()
+    if not base_order or not base_order['driver_id']:
+        conn.close()
+        bot.answer_callback_query(call.id, "У заказа нет назначенного водителя")
+        return
+
+    driver_id = base_order['driver_id']
+
+    # Список заказов, готовых к назначению (приняты клиентом, без водителя)
+    cursor.execute('''
+        SELECT o.*, u.first_name, u.last_name
+        FROM orders o
+        JOIN users u ON o.client_id = u.id
+        WHERE o.status = 'ACCEPTED' AND (o.driver_id IS NULL OR o.driver_id = '')
+        ORDER BY o.created_at DESC
+        LIMIT 10
+    ''')
+    orders = cursor.fetchall()
+
+    if not orders:
+        conn.close()
+        bot.answer_callback_query(call.id, "Нет заказов для назначения")
+        return
+
+    # Показываем список заказов для назначения этому водителю
+    markup = telebot.types.InlineKeyboardMarkup()
+    for order in orders:
+        # Вычисляем номер заказа для клиента
+        cursor.execute('SELECT COUNT(*) FROM orders WHERE client_id = ? AND id <= ?', (order['client_id'], order['id']))
+        client_order_number = cursor.fetchone()[0]
+
+        label = f"#{client_order_number} | {order['from_address']} → {order['to_address']}"
+        if order['price']:
+            label += f" | {order['price']}₽"
+        if order['scheduled_at']:
+            try:
+                st = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+                label += f" | {st}"
+            except:
+                pass
+
+        markup.add(telebot.types.InlineKeyboardButton(label, callback_data=f"assign_to_driver:{order['id']}:{driver_id}"))
+
+    conn.close()
+
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=None
+    )
+    bot.send_message(call.message.chat.id, "Выберите заказ для назначения этому водителю:", reply_markup=markup)
+
+
+# Админ: назначить выбранный заказ конкретному водителю
+@bot.callback_query_handler(func=lambda call: call.data.startswith("assign_to_driver:") and is_admin(call.from_user.id))
+def assign_to_driver_callback(call):
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        bot.answer_callback_query(call.id, "Ошибка обработки")
+        return
+    order_id = int(parts[1])
+    driver_id = int(parts[2])
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT * FROM orders WHERE id = ?', (order_id,))
+    order = cursor.fetchone()
+    cursor.execute('SELECT * FROM drivers WHERE id = ?', (driver_id,))
+    driver = cursor.fetchone()
+
+    if not order or not driver:
+        conn.close()
+        bot.answer_callback_query(call.id, "Ошибка: заказ или водитель не найден")
+        return
+
+    # Обновляем заказ и статус водителя
+    cursor.execute('UPDATE orders SET driver_id = ?, status = ? WHERE id = ?', (driver_id, 'IN_PROGRESS', order_id))
+    if driver['status'] == 'ON_DUTY':
+        cursor.execute('UPDATE drivers SET status = ? WHERE id = ?', ('ON_ORDER', driver_id))
+
+    # Данные клиента и номер заказа для клиента
+    cursor.execute('SELECT user_id FROM users WHERE id = ?', (order['client_id'],))
+    client = cursor.fetchone()
+    client_user_id = client['user_id'] if client else None
+    cursor.execute('SELECT COUNT(*) FROM orders WHERE client_id = ? AND id <= ?', (order['client_id'], order_id))
+    client_order_number = cursor.fetchone()[0]
+
+    conn.commit()
+    conn.close()
+
+    # Чистим инлайн-кнопки предыдущего сообщения
+    try:
+        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
+    except:
+        pass
+
+    # Уведомление админа
+    bot.send_message(
+        call.message.chat.id,
+        f"✅ Водитель {driver['first_name']} ({driver['car_number']}) назначен на заказ #{client_order_number} (ID: {order_id}).",
+        reply_markup=get_admin_keyboard()
+    )
+
+    # Уведомление клиента
+    if client_user_id:
+        client_text = f"🚕 <b>Вам назначен водитель</b>\n\n"
+        client_text += f"Заказ #{client_order_number}\n"
+        client_text += f"Водитель: {driver['first_name']}\n"
+        client_text += f"Автомобиль: {driver['car_number']}\n\n"
+        client_text += "Водитель скоро прибудет на место посадки."
+        bot.send_message(client_user_id, client_text, parse_mode="HTML")
+
+    # Уведомление водителя
+    driver_text = f"🆕 <b>Вам назначен новый заказ</b>\n\n"
+    driver_text += f"Заказ #{client_order_number} (ID: {order_id})\n"
+    driver_text += f"От: {order['from_address']}\n"
+    driver_text += f"До: {order['to_address']}\n"
+    if order['price']:
+        driver_text += f"Цена: {order['price']} руб.\n"
+    if order['scheduled_at']:
+        try:
+            st = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+            driver_text += f"🕐 Время подачи: {st}\n"
+        except:
+            pass
+    if order['comment']:
+        driver_text += f"Комментарий: {order['comment']}\n"
+
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(telebot.types.InlineKeyboardButton("🚗 Водитель подъехал в точку А", callback_data=f"driver_arrived:{order_id}"))
+    bot.send_message(driver['user_id'], driver_text, parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("counter_offer:"))
 def counter_offer_callback(call):
@@ -2532,9 +2689,12 @@ def reject_driver_new_callback(call):
         parse_mode="HTML"
     )
 
-# Обработчик кнопки "Управление водителями"
-@bot.message_handler(func=lambda message: message.text == "👨‍✈️ Управление водителями" and is_admin(message.from_user.id))
-def manage_drivers(message):
+# Обработчик кнопки "Зарегистрированные водители"
+@bot.message_handler(func=lambda message: message.text == "🚖 Зарегистрированные водители")
+def list_registered_drivers(message):
+    if not is_admin(message.from_user.id):
+        bot.send_message(message.chat.id, "Доступ запрещен.")
+        return
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -2569,14 +2729,14 @@ def manage_drivers(message):
                 reply_markup=markup
             )
     
-    # Получаем активных водителей
+    # Получаем всех одобренных водителей
     cursor.execute('SELECT * FROM drivers WHERE is_approved = 1')
     active_drivers = cursor.fetchall()
     
     if active_drivers:
         bot.send_message(
             message.chat.id,
-            f"🚕 <b>Активные водители ({len(active_drivers)}):</b>",
+            f"🚖 <b>Зарегистрированные водители ({len(active_drivers)}):</b>",
             parse_mode="HTML"
         )
         
@@ -3088,14 +3248,21 @@ if __name__ == "__main__":
         logger.info("Бот начал прослушивание сообщений")
         
         # Бесконечный цикл с обработкой ошибок
+        backoff = 5
         while True:
             try:
-                bot.polling(none_stop=True, interval=1, timeout=30)
+                bot.polling(none_stop=True, interval=1, timeout=30, long_polling_timeout=30)
+                backoff = 5  # сброс после успешного цикла
             except Exception as e:
+                msg = str(e)
+                if 'Conflict: terminated by other getUpdates request' in msg or '409' in msg:
+                    logger.error("Конфликт 409: уже запущен другой экземпляр бота. Останавливаю текущий.")
+                    break
                 logger.error(f"Ошибка при polling: {e}")
-                logger.info("Перезапуск polling через 5 секунд...")
+                logger.info(f"Перезапуск polling через {backoff} секунд...")
                 import time
-                time.sleep(5)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
                 continue
                 
     except KeyboardInterrupt:
