@@ -7,6 +7,7 @@ import sys
 import sqlite3
 import json
 import datetime
+from zoneinfo import ZoneInfo
 
 # Настройка логирования
 logging.basicConfig(
@@ -374,7 +375,7 @@ def order_taxi(message):
     # Новый шаг: дата и время
     bot.send_message(
         message.chat.id,
-        "Укажите дату и время подачи такси (например: 10.09 14:30).\nНе ранее чем через 30 минут от текущего времени:",
+        "Укажите дату и время подачи такси (например: 10.09 14:30):",
         reply_markup=None
     )
     bot.register_next_step_handler(message, process_schedule_datetime)
@@ -385,11 +386,13 @@ def process_schedule_datetime(message):
     # Примем формат DD.MM HH:MM
     try:
         # Подставим текущий год
-        now = datetime.datetime.now()
+        # Используем часовой пояс Калининграда (UTC+2)
+        tz = ZoneInfo("Europe/Kaliningrad")
+        now = datetime.datetime.now(tz)
         day, rest = text.split('.')
         month, time_part = rest.split(' ')
         hours, minutes = time_part.split(':')
-        dt = datetime.datetime(year=now.year, month=int(month), day=int(day), hour=int(hours), minute=int(minutes))
+        dt = datetime.datetime(year=now.year, month=int(month), day=int(day), hour=int(hours), minute=int(minutes), tzinfo=tz)
         if dt < now:
             raise ValueError('past')
         # Минимальный интервал: 30 минут
@@ -474,7 +477,7 @@ def process_preorder_payment(message):
         "Проверьте детали предзаказа:\n\n"
         f"Откуда: {data['from_address']}\n"
         f"Куда: {data['to_address']}\n"
-        f"Когда: {datetime.datetime.fromisoformat(data['scheduled_at']).strftime('%d.%m %H:%M')}\n"
+        f"Когда: {datetime.datetime.fromisoformat(data['scheduled_at']).astimezone(ZoneInfo('Europe/Kaliningrad')).strftime('%d.%m %H:%M')}\n"
         f"Оплата: {'Наличные' if payment_method=='CASH' else 'Перевод на карту'}\n"
         f"Комментарий: {data.get('comment') or '—'}\n\n"
         "Подтвердить заказ?"
@@ -532,7 +535,7 @@ def confirm_preorder_callback(call):
         f"🆕 <b>Новый предзаказ #{client_order_number}</b> (ID: {order_id})\n\n"
         f"Откуда: {data['from_address']}\n"
         f"Куда: {data['to_address']}\n"
-        f"Когда: {datetime.datetime.fromisoformat(data['scheduled_at']).strftime('%d.%m %H:%M')}\n"
+        f"Когда: {datetime.datetime.fromisoformat(data['scheduled_at']).astimezone(ZoneInfo('Europe/Kaliningrad')).strftime('%d.%m %H:%M')}\n"
         f"Оплата: {'Наличные' if data.get('payment_method')=='CASH' else 'Перевод на карту'}\n"
         f"Комментарий: {data.get('comment') or '—'}"
     )
@@ -607,17 +610,17 @@ def process_manual_from_address(message):
     from_address = message.text
     
     # Проверяем, что адрес в пределах города
-    if CITY_NAME.lower() not in from_address.lower():
-        bot.send_message(
-            message.chat.id,
-            "К сожалению, указанный адрес находится за пределами зоны обслуживания.\n"
-            "Пожалуйста, введите корректный адрес отправления:"
-        )
-        bot.register_next_step_handler(message, process_manual_from_address)
-        return
+    # Если пользователь не указал название города, подставим "Светлогорск"
+    normalized = from_address.strip()
+    if CITY_NAME.lower() not in normalized.lower():
+        normalized = f"{CITY_NAME}, {normalized}"
+    
+    # Дополнительно можно добавить простейшую валидацию (минимум одна цифра дома)
+    # Сохраняем адрес отправления
+    user_order_data[user_id]['from_address'] = normalized
     
     # Сохраняем адрес отправления
-    user_order_data[user_id]['from_address'] = from_address
+    # уже сохранено выше
     
     # Теперь выбор направления для точки Б
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -1217,7 +1220,7 @@ def accept_price_callback(call):
     scheduled_text = ""
     if order['scheduled_at']:
         try:
-            scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+            scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).astimezone(ZoneInfo('Europe/Kaliningrad')).strftime('%d.%m %H:%M')
             scheduled_text = f"\n🕐 Запланированное время: {scheduled_time}"
         except:
             pass
@@ -1469,7 +1472,7 @@ def select_driver_callback(call):
     # Добавляем время заказа
     if order['scheduled_at']:
         try:
-            scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+            scheduled_time = datetime.datetime.fromisoformat(order['scheduled_at']).astimezone(ZoneInfo('Europe/Kaliningrad')).strftime('%d.%m %H:%M')
             driver_text += f"🕐 Время подачи: {scheduled_time}\n"
         except:
             pass
@@ -1536,7 +1539,7 @@ def assign_next_callback(call):
             label += f" | {order['price']}₽"
         if order['scheduled_at']:
             try:
-                st = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+                st = datetime.datetime.fromisoformat(order['scheduled_at']).astimezone(ZoneInfo('Europe/Kaliningrad')).strftime('%d.%m %H:%M')
                 label += f" | {st}"
             except:
                 pass
@@ -1622,7 +1625,7 @@ def assign_to_driver_callback(call):
         driver_text += f"Цена: {order['price']} руб.\n"
     if order['scheduled_at']:
         try:
-            st = datetime.datetime.fromisoformat(order['scheduled_at']).strftime('%d.%m %H:%M')
+            st = datetime.datetime.fromisoformat(order['scheduled_at']).astimezone(ZoneInfo('Europe/Kaliningrad')).strftime('%d.%m %H:%M')
             driver_text += f"🕐 Время подачи: {st}\n"
         except:
             pass
